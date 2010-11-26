@@ -37,9 +37,11 @@ import java.util.zip.ZipFile;
 
 /**
  * @author <a href="mailto:david.lloyd@redhat.com">David M. Lloyd</a>
+ * @author Kabir Khan
  */
 final class SystemLocalLoader implements LocalLoader {
 
+    private final PathFilter filter;
     private final Set<String> pathSet;
 
     private SystemLocalLoader() {
@@ -47,6 +49,9 @@ final class SystemLocalLoader implements LocalLoader {
         final Set<String> jarSet = new HashSet<String>(128);
         final String sunBootClassPath = AccessController.doPrivileged(new PropertyReadAction("sun.boot.class.path"));
         final String javaClassPath = AccessController.doPrivileged(new PropertyReadAction("java.class.path"));
+        final String includeFilter = AccessController.doPrivileged(new PropertyReadAction("module.include.path"));
+        final String excludeFilter = AccessController.doPrivileged(new PropertyReadAction("module.exclude.path"));
+        filter = createPathFilter(includeFilter, excludeFilter);
         processClassPathItem(sunBootClassPath, jarSet, pathSet);
         processClassPathItem(javaClassPath, jarSet, pathSet);
         this.pathSet = pathSet;
@@ -57,6 +62,12 @@ final class SystemLocalLoader implements LocalLoader {
     public Class<?> loadClassLocal(final String name, final boolean resolve) {
         final ClassLoader scl = SYSTEM_CL;
         try {
+            if (filter != null) {
+                final String fullpath = name.replace('.', '/');
+                if (!filter.accept(fullpath)) {
+                    return null;
+                }
+            }
             return Class.forName(name, resolve, scl);
         } catch (ClassNotFoundException e) {
             return null;
@@ -151,7 +162,9 @@ final class SystemLocalLoader implements LocalLoader {
                 processDirectory1(pathSet, entry, file.getPath());
             } else {
                 final String parent = entry.getParent();
-                if (parent != null) pathSet.add(parent);
+                if (parent != null) {
+                    pathSet.add(parent);
+                }
             }
         }
     }
@@ -171,5 +184,32 @@ final class SystemLocalLoader implements LocalLoader {
                 }
             }
         }
+    }
+    
+    private PathFilter createPathFilter(String includeFilter, String excludeFilter) {
+        MultiplePathFilterBuilder builder = PathFilters.multiplePathFilterBuilder(true);
+        if (includeFilter == null && excludeFilter == null) {
+            return null;
+        }
+        if (includeFilter != null) {
+            String[] includes = includeFilter.split(",");
+            for (String include : includes) {
+                builder.addFilter(createFilter(builder, include), true);
+            }
+        }
+        if (excludeFilter != null) {
+            String[] excludes = excludeFilter.split(",");
+            for (String exclude : excludes) {
+                builder.addFilter(createFilter(builder, exclude), false);
+            }
+        }
+        return builder.create();
+    }
+    
+    private PathFilter createFilter(MultiplePathFilterBuilder builder, String path) {
+        if (path.startsWith("java.") || path.startsWith("sun.")) {
+            throw new IllegalArgumentException("Can't filter bootstrap core classes: " + path);
+        }
+        return PathFilters.match(path.trim());
     }
 }
